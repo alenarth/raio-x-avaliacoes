@@ -90,3 +90,20 @@ def test_missing_key_is_a_clear_error(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
         GeminiCaller()
+
+
+def test_retries_without_thinking_option_when_model_rejects_it(fake_genai, monkeypatch):
+    caller = make_caller(monkeypatch)
+    caller._with_low_thinking = lambda config: "low-thinking-config"
+    seen = []
+    original = caller._client.models.generate_content
+
+    def generate(model, contents, config):
+        seen.append(config)
+        if config == "low-thinking-config":
+            raise FakeClientError(400, "thinking_level is not supported")
+        return original(model, contents, config)
+
+    caller._client.models.generate_content = generate
+    assert caller._generate("oi", "plain-config").text == '{"ok": true}'
+    assert seen == ["low-thinking-config", "plain-config"] and caller._low_thinking is False

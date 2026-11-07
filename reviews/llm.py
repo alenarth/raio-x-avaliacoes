@@ -88,6 +88,21 @@ class GeminiCaller:
         self._client = make_client(api_key)
         self.model = model or os.environ.get("GEMINI_MODEL") or pick_flash_model(available_models(self._client))
         self._last_call = 0.0
+        self._low_thinking = True
+
+    def _with_low_thinking(self, config):
+        """Extraction and classification don't need long reasoning: asking for
+        low thinking makes answers several times faster. Falls back silently on
+        SDK versions or models that don't support it."""
+        if config is None or not self._low_thinking:
+            return config
+        try:
+            from google.genai import types
+
+            return config.model_copy(update={"thinking_config": types.ThinkingConfig(thinking_level="low")})
+        except Exception:
+            self._low_thinking = False
+            return config
 
     def _generate(self, contents, config):
         from google.genai import errors
@@ -96,7 +111,14 @@ class GeminiCaller:
         if wait > 0:
             time.sleep(wait)
         try:
-            return self._client.models.generate_content(model=self.model, contents=contents, config=config)
+            try:
+                return self._client.models.generate_content(
+                    model=self.model, contents=contents, config=self._with_low_thinking(config))
+            except errors.ClientError as error:
+                if error.code != 400 or not self._low_thinking or "think" not in str(error).lower():
+                    raise
+                self._low_thinking = False  # model rejects the option: retry without it
+                return self._client.models.generate_content(model=self.model, contents=contents, config=config)
         except errors.ClientError as error:
             detail = str(error)[:400]
             if error.code == 429:
