@@ -12,6 +12,12 @@ class FakeClientError(Exception):
         self.code = code
 
 
+class FakeServerError(Exception):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
 class FakeModel:
     def __init__(self, name):
         self.name = name
@@ -24,12 +30,16 @@ def fake_genai(monkeypatch):
 
     class Models:
         def list(self):
-            return [FakeModel("models/gemini-3-flash"), FakeModel("models/gemini-3-pro")]
+            return [FakeModel("models/gemini-3-flash"), FakeModel("models/gemini-2.5-flash"),
+                    FakeModel("models/gemini-3-pro")]
 
         def generate_content(self, model, contents, config):
             behaviour["calls"].append(model)
-            if behaviour["error"]:
-                raise behaviour["error"]
+            error = behaviour["error"]
+            if callable(error):
+                error = error(model)
+            if error:
+                raise error
             return pytypes.SimpleNamespace(text='{"ok": true}')
 
     class Client:
@@ -43,6 +53,7 @@ def fake_genai(monkeypatch):
     types_mod.HttpRetryOptions = lambda **kw: kw
     errors_mod = pytypes.ModuleType("google.genai.errors")
     errors_mod.ClientError = FakeClientError
+    errors_mod.ServerError = FakeServerError
     genai.types, genai.errors = types_mod, errors_mod
     google = pytypes.ModuleType("google")
     google.genai = genai
@@ -57,6 +68,7 @@ def make_caller(monkeypatch):
     from reviews.llm import GeminiCaller
 
     monkeypatch.setattr("reviews.llm.MIN_SECONDS_BETWEEN_CALLS", 0)
+    monkeypatch.setattr("reviews.llm.SERVER_RETRY_SECONDS", 0)
     monkeypatch.delenv("GEMINI_MODEL", raising=False)
     return GeminiCaller(api_key="fake")
 
@@ -67,14 +79,29 @@ def test_picks_model_from_api(fake_genai, monkeypatch):
     assert caller._generate("oi", None).text == '{"ok": true}'
 
 
-def test_quota_error_is_reported_not_retried(fake_genai, monkeypatch):
+def test_quota_error_tries_next_model_then_reports(fake_genai, monkeypatch):
     from reviews.llm import QuotaError
 
     caller = make_caller(monkeypatch)
     fake_genai["error"] = FakeClientError(429, "RESOURCE_EXHAUSTED")
     with pytest.raises(QuotaError, match="Limite do plano gratuito"):
         caller._generate("oi", None)
-    assert len(fake_genai["calls"]) == 1
+    assert fake_genai["calls"] == ["gemini-3-flash", "gemini-2.5-flash"]
+
+
+def test_overloaded_model_falls_back_to_next(fake_genai, monkeypatch):
+    caller = make_caller(monkeypatch)
+    fake_genai["error"] = lambda model: FakeServerError(503, "UNAVAILABLE") if model == "gemini-3-flash" else None
+    assert caller._generate("oi", None).text == '{"ok": true}'
+    assert fake_genai["calls"] == ["gemini-3-flash", "gemini-3-flash", "gemini-2.5-flash"]
+    assert caller.model == "gemini-2.5-flash"
+
+
+def test_all_models_overloaded_is_a_clear_error(fake_genai, monkeypatch):
+    caller = make_caller(monkeypatch)
+    fake_genai["error"] = FakeServerError(503, "UNAVAILABLE")
+    with pytest.raises(RuntimeError, match="sobrecarregado"):
+        caller._generate("oi", None)
 
 
 def test_other_client_errors_become_runtime_errors(fake_genai, monkeypatch):

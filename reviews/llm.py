@@ -36,22 +36,26 @@ Dados:
 _SKIP = ("lite", "image", "tts", "audio", "live", "embedding", "thinking", "exp", "latest", "computer")
 
 
-def pick_flash_model(model_names: list[str]) -> str:
-    """Choose the newest Gemini Flash model from the ones this API key can use.
-
-    Model names change every few months, so instead of hard-coding one we
-    look at what the API offers. Stable versions win over previews.
-    """
+def flash_models_by_preference(model_names: list[str]) -> list[str]:
+    """Gemini Flash models this key can use, best first: newest stable
+    versions, then previews. Names change every few months, so we read
+    them from the API instead of hard-coding one."""
     def version(name: str) -> tuple[int, ...]:
         return tuple(int(n) for n in re.findall(r"\d+", name.split("flash")[0]))
 
     names = [n.removeprefix("models/") for n in model_names]
     flash = [n for n in names if n.startswith("gemini-") and "flash" in n and not any(s in n for s in _SKIP)]
-    stable = [n for n in flash if "preview" not in n]
-    candidates = stable or flash
-    if not candidates:
+    def newest_first(group: list[str]) -> list[str]:
+        return sorted(set(group), key=lambda n: (version(n), -len(n)), reverse=True)
+
+    ordered = newest_first([n for n in flash if "preview" not in n]) + newest_first([n for n in flash if "preview" in n])
+    if not ordered:
         raise RuntimeError("Nenhum modelo Gemini Flash disponível para esta chave de API.")
-    return max(candidates, key=lambda n: (version(n), -len(n)))
+    return ordered
+
+
+def pick_flash_model(model_names: list[str]) -> str:
+    return flash_models_by_preference(model_names)[0]
 
 
 def available_models(client) -> list[str]:
@@ -59,6 +63,7 @@ def available_models(client) -> list[str]:
 
 
 MIN_SECONDS_BETWEEN_CALLS = 5.0  # keeps us under the free tier's requests-per-minute limit
+SERVER_RETRY_SECONDS = 5.0
 
 
 class QuotaError(RuntimeError):
@@ -86,7 +91,9 @@ class GeminiCaller:
         if not api_key:
             raise RuntimeError("Defina a variável de ambiente GEMINI_API_KEY.")
         self._client = make_client(api_key)
-        self.model = model or os.environ.get("GEMINI_MODEL") or pick_flash_model(available_models(self._client))
+        chosen = model or os.environ.get("GEMINI_MODEL")
+        self._models = [chosen] if chosen else flash_models_by_preference(available_models(self._client))[:3]
+        self.model = self._models[0]
         self._last_call = 0.0
         self._low_thinking = True
 
@@ -104,7 +111,7 @@ class GeminiCaller:
             self._low_thinking = False
             return config
 
-    def _generate(self, contents, config):
+    def _call_once(self, contents, config):
         from google.genai import errors
 
         wait = MIN_SECONDS_BETWEEN_CALLS - (time.monotonic() - self._last_call)
@@ -119,17 +126,36 @@ class GeminiCaller:
                     raise
                 self._low_thinking = False  # model rejects the option: retry without it
                 return self._client.models.generate_content(model=self.model, contents=contents, config=config)
-        except errors.ClientError as error:
-            detail = str(error)[:400]
-            if error.code == 429:
-                raise QuotaError(
-                    "Limite do plano gratuito do Gemini atingido. Espere alguns minutos "
-                    f"(ou até o dia seguinte, se for o limite diário). Detalhe: {detail}"
-                ) from error
-            raise RuntimeError(f"Erro da API do Gemini ({error.code}): {detail}") from error
         finally:
             self._last_call = time.monotonic()
 
+    def _generate(self, contents, config):
+        """Call Gemini. If the model is overloaded (5xx) or out of free quota
+        (429), retry once and then fall back to the next Flash model, since
+        each model has its own capacity and quota."""
+        from google.genai import errors
+
+        last_error = None
+        for model in list(self._models[self._models.index(self.model):]):
+            self.model = model
+            for attempt in range(2):
+                try:
+                    return self._call_once(contents, config)
+                except errors.ServerError as error:
+                    last_error = error
+                    time.sleep(SERVER_RETRY_SECONDS * (attempt + 1))
+                except errors.ClientError as error:
+                    if error.code != 429:
+                        raise RuntimeError(f"Erro da API do Gemini ({error.code}): {str(error)[:400]}") from error
+                    last_error = error
+                    break  # quota is per model: try the next one
+        detail = str(last_error)[:400]
+        if isinstance(last_error, errors.ClientError):
+            raise QuotaError(
+                "Limite do plano gratuito do Gemini atingido. Espere alguns minutos "
+                f"(ou até o dia seguinte, se for o limite diário). Detalhe: {detail}"
+            ) from last_error
+        raise RuntimeError(f"O Gemini está sobrecarregado no momento. Tente de novo em instantes. Detalhe: {detail}") from last_error
 
 class ReviewLLM(Protocol):
     def classify(self, batch: list[dict]) -> list[ReviewAnalysis]: ...
