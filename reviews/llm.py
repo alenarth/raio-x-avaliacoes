@@ -64,6 +64,7 @@ def available_models(client) -> list[str]:
 
 MIN_SECONDS_BETWEEN_CALLS = 5.0  # keeps us under the free tier's requests-per-minute limit
 SERVER_RETRY_SECONDS = 5.0
+REQUEST_TIMEOUT_MS = 90_000  # an overloaded model can hang: give up and try the next one
 
 
 class QuotaError(RuntimeError):
@@ -77,7 +78,7 @@ def make_client(api_key: str):
     from google.genai import types
 
     try:
-        options = types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1))
+        options = types.HttpOptions(timeout=REQUEST_TIMEOUT_MS, retry_options=types.HttpRetryOptions(attempts=1))
         return genai.Client(api_key=api_key, http_options=options)
     except (AttributeError, TypeError, ValueError):
         return genai.Client(api_key=api_key)
@@ -149,6 +150,11 @@ class GeminiCaller:
                         raise RuntimeError(f"Erro da API do Gemini ({error.code}): {str(error)[:400]}") from error
                     last_error = error
                     break  # quota is per model: try the next one
+                except Exception as error:  # network timeouts (httpx) when the model hangs
+                    if "timeout" not in type(error).__name__.lower():
+                        raise
+                    last_error = error
+                    break
         detail = str(last_error)[:400]
         if isinstance(last_error, errors.ClientError):
             raise QuotaError(

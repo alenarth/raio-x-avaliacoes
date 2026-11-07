@@ -134,3 +134,14 @@ def test_retries_without_thinking_option_when_model_rejects_it(fake_genai, monke
     caller._client.models.generate_content = generate
     assert caller._generate("oi", "plain-config").text == '{"ok": true}'
     assert seen == ["low-thinking-config", "plain-config"] and caller._low_thinking is False
+
+
+class ReadTimeout(Exception):
+    pass
+
+
+def test_hanging_model_times_out_and_falls_back(fake_genai, monkeypatch):
+    caller = make_caller(monkeypatch)
+    fake_genai["error"] = lambda model: ReadTimeout("slow") if model == "gemini-3-flash" else None
+    assert caller._generate("oi", None).text == '{"ok": true}'
+    assert fake_genai["calls"] == ["gemini-3-flash", "gemini-2.5-flash"]

@@ -2,7 +2,7 @@
 
 Dashboard que lê **todas as avaliações de um restaurante de delivery com IA** e responde em segundos o que o dono levaria horas para descobrir: **o que mais gera reclamação, o que está piorando e o que fazer primeiro.**
 
-**Demo:** [SEU_LINK.streamlit.app](https://SEU_LINK.streamlit.app)
+**Demo:** [raio-x-avaliacoes.streamlit.app](https://raio-x-avaliacoes.streamlit.app)
 
 ![tests](https://github.com/alenarth/raio-x-avaliacoes/actions/workflows/tests.yml/badge.svg)
 
@@ -32,20 +32,27 @@ O CSV de exemplo é de um restaurante **inventado**, com 152 avaliações em 8 s
 - **Saída estruturada com schema (Pydantic)** e envio em lotes de 25 avaliações: menos chamadas, menos custo e nenhuma resposta fora do formato.
 - **A IA não inventa o que pulou:** se o modelo deixar de responder alguma avaliação, ela aparece como "não classificada" e o painel avisa, em vez de entrar com um chute.
 - **O plano de ação recebe só números agregados e resumos**, nunca a base inteira: fica mais barato, mais rápido e o modelo é instruído a não inventar números.
+- **Resiliência a falhas da API:** o modelo é escolhido automaticamente entre os Gemini Flash disponíveis para a chave. Se ele estiver sobrecarregado (5xx), travar (timeout) ou estourar a cota (429), o app tenta de novo e passa para o próximo modelo, e mostra uma mensagem clara se nenhum responder.
 - **Provedor de LLM atrás de uma interface:** os testes usam um LLM falso e rodam sem chave nem internet (GitHub Actions).
 
 ## Avaliação
 
 O exemplo fictício tem gabarito com os assuntos e sentimentos corretos de cada avaliação (gerado com semente fixa por `scripts/generate_example.py`, igual em qualquer máquina). O botão **Rodar avaliação** na barra lateral da demo, ou o script `python -m scripts.evaluate`, mede o classificador:
 
-| Métrica | Valor |
+| Métrica | Resultado |
 |---|---|
-| Assuntos identificados (F1) | _preencher_ |
-| Sentimento por assunto correto | _preencher_ |
-| Sentimento geral correto | _preencher_ |
-| Casos urgentes encontrados | _preencher_ |
-| Tempo para 152 avaliações | _preencher_ |
+| Modelo | gemini-3.6-flash |
+| Avaliações | 152 |
+| Assuntos identificados (F1) | 93,0% |
+| Sentimento por assunto correto | 98,4% |
+| Sentimento geral correto | 98,7% |
+| Casos urgentes encontrados | 100% (3 de 3) |
+| Falsos alarmes de urgência | 0 |
+| Tempo para classificar as 152 | 104 s |
 
+Rodado em 07/11/2026 pelo botão **Rodar avaliação** da demo.
+
+**Leitura honesta do resultado:** as avaliações do exemplo foram geradas a partir de frases-modelo, então são mais diretas que avaliações reais (sem gírias, ironia ou erros de digitação). O próximo passo é medir com avaliações reais revisadas à mão.
 
 ## Como rodar
 
