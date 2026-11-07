@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from typing import Protocol
 
 from .schema import BatchAnalysis, ReviewAnalysis
@@ -57,26 +58,67 @@ def available_models(client) -> list[str]:
     return [m.name for m in client.models.list() if "generateContent" in (getattr(m, "supported_actions", None) or [])]
 
 
+MIN_SECONDS_BETWEEN_CALLS = 5.0  # keeps us under the free tier's requests-per-minute limit
+
+
+class QuotaError(RuntimeError):
+    """The Gemini free tier limit was hit (HTTP 429)."""
+
+
+def make_client(api_key: str):
+    """Gemini client without silent automatic retries: on a quota error we
+    want to tell the user right away instead of hanging for minutes."""
+    from google import genai
+    from google.genai import types
+
+    try:
+        options = types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1))
+        return genai.Client(api_key=api_key, http_options=options)
+    except (AttributeError, TypeError, ValueError):
+        return genai.Client(api_key=api_key)
+
+
+class GeminiCaller:
+    """Shared plumbing: picks the model, spaces out calls, translates errors."""
+
+    def __init__(self, api_key: str | None = None, model: str | None = None):
+        api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("Defina a variável de ambiente GEMINI_API_KEY.")
+        self._client = make_client(api_key)
+        self.model = model or os.environ.get("GEMINI_MODEL") or pick_flash_model(available_models(self._client))
+        self._last_call = 0.0
+
+    def _generate(self, contents, config):
+        from google.genai import errors
+
+        wait = MIN_SECONDS_BETWEEN_CALLS - (time.monotonic() - self._last_call)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            return self._client.models.generate_content(model=self.model, contents=contents, config=config)
+        except errors.ClientError as error:
+            detail = str(error)[:400]
+            if error.code == 429:
+                raise QuotaError(
+                    "Limite do plano gratuito do Gemini atingido. Espere alguns minutos "
+                    f"(ou até o dia seguinte, se for o limite diário). Detalhe: {detail}"
+                ) from error
+            raise RuntimeError(f"Erro da API do Gemini ({error.code}): {detail}") from error
+        finally:
+            self._last_call = time.monotonic()
+
+
 class ReviewLLM(Protocol):
     def classify(self, batch: list[dict]) -> list[ReviewAnalysis]: ...
     def write(self, prompt: str) -> str: ...
 
 
-class GeminiReviewLLM:
-    def __init__(self, api_key: str | None = None, model: str | None = None):
-        from google import genai
-
-        api_key = api_key or os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("Defina a variável de ambiente GEMINI_API_KEY.")
-        self._client = genai.Client(api_key=api_key)
-        self.model = model or os.environ.get("GEMINI_MODEL") or pick_flash_model(available_models(self._client))
-
+class GeminiReviewLLM(GeminiCaller):
     def classify(self, batch: list[dict]) -> list[ReviewAnalysis]:
         from google.genai import types
 
-        response = self._client.models.generate_content(
-            model=self.model,
+        response = self._generate(
             contents=CLASSIFY_PROMPT + json.dumps(batch, ensure_ascii=False),
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -89,9 +131,5 @@ class GeminiReviewLLM:
     def write(self, prompt: str) -> str:
         from google.genai import types
 
-        response = self._client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.3),
-        )
+        response = self._generate(contents=prompt, config=types.GenerateContentConfig(temperature=0.3))
         return response.text

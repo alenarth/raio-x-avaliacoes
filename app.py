@@ -45,6 +45,7 @@ def run_evaluation() -> None:
     s = score(result, truth)
     st.markdown(
         "| Métrica | Valor |\n|---|---|\n"
+        f"| Modelo | {get_llm().model} |\n"
         f"| Avaliações | {len(df_eval)} |\n"
         f"| Assuntos identificados (F1) | {s['aspecto_f1']:.1%} |\n"
         f"| Sentimento por assunto correto | {s['sentimento_por_aspecto']:.1%} |\n"
@@ -125,7 +126,12 @@ if "result" not in st.session_state:
             st.stop()
         bar = st.progress(0.0, text="Classificando avaliações...")
         start = time.perf_counter()
-        result = classify(df, llm, on_progress=lambda p: bar.progress(p, text=f"Classificando... {p:.0%}"))
+        try:
+            result = classify(df, llm, on_progress=lambda p: bar.progress(p, text=f"Classificando... {p:.0%}"))
+        except RuntimeError as error:
+            bar.empty()
+            st.error(str(error))
+            st.stop()
         st.session_state["result"] = result
         st.session_state["seconds"] = time.perf_counter() - start
         bar.empty()
@@ -145,6 +151,7 @@ c4.metric("Casos urgentes", info["urgentes"])
 manual_min = info["total"] * manual_seconds / 60
 c5.metric("Tempo economizado", f"{manual_min:.0f} min",
           help=f"Leitura manual estimada: {manual_min:.0f} min. IA: {st.session_state['seconds']:.0f} s.")
+st.caption(f"Classificado com {get_llm().model} em {st.session_state['seconds']:.0f}s.")
 if info["nao_classificadas"]:
     st.warning(f"{info['nao_classificadas']} avaliações não foram classificadas pela IA e ficaram de fora dos gráficos.")
 
@@ -194,7 +201,10 @@ with plan_tab:
     st.write("A IA recebe só os números do painel e os resumos das reclamações, e propõe prioridades para a semana.")
     if st.button("Gerar plano de ação", type="primary"):
         with st.spinner("Escrevendo plano..."):
-            st.session_state["plan"] = action_plan(result, get_llm())
+            try:
+                st.session_state["plan"] = action_plan(result, get_llm())
+            except RuntimeError as error:
+                st.error(str(error))
     if "plan" in st.session_state:
         st.markdown(st.session_state["plan"])
         st.download_button("Baixar plano (.md)", st.session_state["plan"], "plano_de_acao.md", "text/markdown")
